@@ -1572,6 +1572,11 @@
             }
 
             renderSidebar();
+
+            // Save progress to SCORM
+            if (typeof saveScormProgress === 'function') {
+                saveScormProgress();
+            }
         }
 
         function goToScreen(screenId) {
@@ -2692,9 +2697,19 @@
             const resultBox = document.getElementById('examResultBox');
             resultBox.classList.remove('hidden');
 
+            // Set SCORM score
+            if (scormAPI) {
+                scormAPI.LMSSetValue("cmi.core.score.raw", String(finalPercent));
+                scormAPI.LMSSetValue("cmi.core.score.max", "100");
+                scormAPI.LMSSetValue("cmi.core.score.min", "0");
+            }
+
             if (examScore >= 4) {
                 // Passed (80% or 100%)
                 examFinished = true;
+                if (scormAPI) {
+                    scormAPI.LMSSetValue("cmi.core.lesson_status", "passed");
+                }
                 resultBox.innerHTML = `
                     <div class="w-14 h-14 bg-emerald-50 text-emerald-600 rounded-full flex items-center justify-center text-2xl mx-auto"><i class="fa-solid fa-award"></i></div>
                     <h3 class="text-lg font-bold text-slate-900 font-serif">Keputusan: LULUS</h3>
@@ -2711,6 +2726,9 @@
             } else {
                 // Failed (retry is kept here perfectly)
                 examFinished = false;
+                if (scormAPI) {
+                    scormAPI.LMSSetValue("cmi.core.lesson_status", "failed");
+                }
                 resultBox.innerHTML = `
                     <div class="w-14 h-14 bg-red-50 text-red-600 rounded-full flex items-center justify-center text-2xl mx-auto"><i class="fa-solid fa-triangle-exclamation"></i></div>
                     <h3 class="text-lg font-bold text-slate-900">Keputusan: TIDAK LULUS</h3>
@@ -2743,6 +2761,13 @@
         }
 
         function restartCourseFromOutro() {
+            // Reset SCORM status
+            if (scormAPI) {
+                scormAPI.LMSSetValue("cmi.core.lesson_status", "incomplete");
+                scormAPI.LMSSetValue("cmi.core.score.raw", "0");
+                scormAPI.LMSCommit("");
+            }
+
             currentScreenIdx = 0;
             visitedScreens = [1]; // Reset back strictly to Screen 1
             viewedObjectives = [];
@@ -2804,9 +2829,399 @@
             document.getElementById('examResultBox').classList.add('hidden');
         }
 
+        // ==========================================
+        // SCORM 1.2 API INTEGRATION & SIMULATOR
+        // ==========================================
+        var scormAPI = null;
+        var scormActive = false;
+        var scormLogs = [];
+
+        function scormLog(type, message, details) {
+            const time = new Date().toLocaleTimeString();
+            scormLogs.push({ time, type, message, details });
+            console.log(`[SCORM ${type.toUpperCase()}] ${message}`, details || "");
+            
+            const logContainer = document.getElementById('scormLogContainer');
+            if (logContainer) {
+                const logItem = document.createElement('div');
+                logItem.className = "text-[11px] font-mono py-1 border-b border-slate-800 flex flex-col";
+                
+                let badgeColor = "text-blue-400";
+                if (type === "init" || type === "finish") badgeColor = "text-purple-400";
+                else if (type === "set") badgeColor = "text-amber-400";
+                else if (type === "get") badgeColor = "text-teal-400";
+                else if (type === "commit") badgeColor = "text-emerald-400";
+                else if (type === "error") badgeColor = "text-red-400";
+
+                logItem.innerHTML = `
+                    <div class="flex items-center justify-between">
+                        <span class="text-slate-500">${time}</span>
+                        <span class="font-bold uppercase ${badgeColor}">${type}</span>
+                    </div>
+                    <span class="text-slate-200 mt-0.5">${message}</span>
+                    ${details ? `<span class="text-slate-400 text-[10px] break-all bg-slate-950/50 p-1 rounded mt-0.5">${details}</span>` : ""}
+                `;
+                logContainer.appendChild(logItem);
+                logContainer.scrollTop = logContainer.scrollHeight;
+            }
+            updateScormVarDisplay();
+        }
+
+        var localScormData = {
+            "cmi.core.student_name": "Izzuddin (Simulasi)",
+            "cmi.core.lesson_status": "not attempted",
+            "cmi.core.lesson_location": "1",
+            "cmi.core.score.raw": "0",
+            "cmi.core.score.max": "100",
+            "cmi.core.score.min": "0",
+            "cmi.suspend_data": ""
+        };
+
+        var mockAPI = {
+            LMSInitialize: function(param) {
+                scormLog("init", "LMSInitialize() dipanggil", "");
+                return "true";
+            },
+            LMSFinish: function(param) {
+                scormLog("finish", "LMSFinish() dipanggil", "");
+                return "true";
+            },
+            LMSGetValue: function(element) {
+                var val = localScormData[element] || "";
+                scormLog("get", `LMSGetValue('${element}')`, `Pulangan: "${val}"`);
+                return val;
+            },
+            LMSSetValue: function(element, value) {
+                localScormData[element] = String(value);
+                scormLog("set", `LMSSetValue('${element}', '${value}')`, "Berjaya disimpan");
+                return "true";
+            },
+            LMSCommit: function(param) {
+                scormLog("commit", "LMSCommit() dipanggil", "Data dihantar ke server LMS");
+                return "true";
+            },
+            LMSGetLastError: function() { return "0"; },
+            LMSGetErrorString: function(err) { return "No error"; },
+            LMSGetDiagnostic: function(err) { return "No diagnostic info"; }
+        };
+
+        function updateScormVarDisplay() {
+            const statusEl = document.getElementById('scormValStatus');
+            const locEl = document.getElementById('scormValLoc');
+            const scoreEl = document.getElementById('scormValScore');
+            const nameEl = document.getElementById('scormValName');
+
+            if (scormAPI) {
+                if (statusEl) statusEl.innerText = scormAPI.LMSGetValue("cmi.core.lesson_status");
+                if (locEl) locEl.innerText = scormAPI.LMSGetValue("cmi.core.lesson_location");
+                if (scoreEl) scoreEl.innerText = scormAPI.LMSGetValue("cmi.core.score.raw") + "%";
+                if (nameEl) nameEl.innerText = scormAPI.LMSGetValue("cmi.core.student_name");
+            }
+        }
+
+        function findAPI(win) {
+            var maxTries = 500;
+            var tries = 0;
+            while ((win.API == null) && (win.parent != null) && (win.parent != win)) {
+                tries++;
+                if (tries > maxTries) return null;
+                win = win.parent;
+            }
+            if (win.API != null) return win.API;
+            if ((win.API == null) && (win.opener != null)) {
+                win = win.opener;
+                tries = 0;
+                while ((win.API == null) && (win.parent != null) && (win.parent != win)) {
+                    tries++;
+                    if (tries > maxTries) return null;
+                    win = win.parent;
+                }
+                return win.API;
+            }
+            return null;
+        }
+
+        function formatStudentName(lmsName) {
+            if (!lmsName) return "Pegawai Kualiti EPSA";
+            if (lmsName.indexOf(",") !== -1) {
+                var parts = lmsName.split(",");
+                return (parts[1].trim() + " " + parts[0].trim()).trim();
+            }
+            return lmsName;
+        }
+
+        function getScreenTitleById(screenId) {
+            var scr = screens.find(s => s.id === screenId);
+            return scr ? scr.title : "";
+        }
+
+        function getSerializedState() {
+            var state = {
+                visitedScreens: visitedScreens,
+                viewedObjectives: viewedObjectives,
+                introVideoCompleted: introVideoCompleted,
+                viewedProcesses: viewedProcesses,
+                visitedHotspots: visitedHotspots,
+                scenarioStep: scenarioStep,
+                quizScore: quizScore,
+                quizFinished: quizFinished,
+                matchTaskFinished: matchTaskFinished,
+                matchedPairs: matchedPairs,
+                visitedSummaryPages: visitedSummaryPages,
+                currentSummaryPage: currentSummaryPage,
+                examScore: examScore,
+                examFinished: examFinished
+            };
+            return JSON.stringify(state);
+        }
+
+        function restoreScormState() {
+            if (!scormAPI) return;
+            var location = scormAPI.LMSGetValue("cmi.core.lesson_location");
+            var suspendDataStr = scormAPI.LMSGetValue("cmi.suspend_data");
+
+            if (suspendDataStr && suspendDataStr.trim() !== "") {
+                try {
+                    var state = JSON.parse(suspendDataStr);
+                    if (state.visitedScreens) visitedScreens = state.visitedScreens;
+                    if (state.viewedObjectives) viewedObjectives = state.viewedObjectives;
+                    if (state.introVideoCompleted !== undefined) introVideoCompleted = state.introVideoCompleted;
+                    if (state.viewedProcesses) viewedProcesses = state.viewedProcesses;
+                    if (state.visitedHotspots) visitedHotspots = state.visitedHotspots;
+                    if (state.scenarioStep !== undefined) scenarioStep = state.scenarioStep;
+                    if (state.quizScore !== undefined) quizScore = state.quizScore;
+                    if (state.quizFinished !== undefined) quizFinished = state.quizFinished;
+                    if (state.matchTaskFinished !== undefined) matchTaskFinished = state.matchTaskFinished;
+                    if (state.matchedPairs) matchedPairs = state.matchedPairs;
+                    if (state.visitedSummaryPages) visitedSummaryPages = state.visitedSummaryPages;
+                    if (state.currentSummaryPage !== undefined) currentSummaryPage = state.currentSummaryPage;
+                    if (state.examScore !== undefined) examScore = state.examScore;
+                    if (state.examFinished !== undefined) examFinished = state.examFinished;
+                    
+                    scormLog("init", "State modul berjaya dipulihkan daripada cmi.suspend_data.", "");
+                } catch(e) {
+                    scormLog("error", "Gagal memproses cmi.suspend_data JSON.", e.message);
+                }
+            }
+
+            if (location && location.trim() !== "" && location !== "1") {
+                var screenId = parseInt(location);
+                if (screenId > 1 && screenId <= 13) {
+                    setTimeout(() => {
+                        if (confirm("Anda ingin menyambung pembelajaran dari halaman yang terakhir anda layari (Halaman " + screenId + ": " + getScreenTitleById(screenId) + ")?")) {
+                            goToScreen(screenId);
+                        } else {
+                            goToScreen(1);
+                        }
+                    }, 500);
+                }
+            }
+        }
+
+        function saveScormProgress() {
+            if (scormAPI) {
+                var currentScreenId = screens[currentScreenIdx].id;
+                scormAPI.LMSSetValue("cmi.core.lesson_location", String(currentScreenId));
+                scormAPI.LMSSetValue("cmi.suspend_data", getSerializedState());
+                scormAPI.LMSCommit("");
+                
+                if (!scormActive) {
+                    try {
+                        localStorage.setItem('mock_scorm_data', JSON.stringify(localScormData));
+                    } catch(e) {}
+                }
+            }
+        }
+
+        function formatCMITime(milliseconds) {
+            var seconds = Math.floor(milliseconds / 1000);
+            var hours = Math.floor(seconds / 3600);
+            seconds %= 3600;
+            var minutes = Math.floor(seconds / 60);
+            seconds %= 60;
+            
+            var hoursStr = hours.toString().padStart(2, '0');
+            var minsStr = minutes.toString().padStart(2, '0');
+            var secsStr = seconds.toString().padStart(2, '0');
+            
+            return hoursStr + ":" + minsStr + ":" + secsStr;
+        }
+
+        function initSCORM() {
+            scormAPI = findAPI(window);
+            
+            if (scormAPI !== null) {
+                var initResult = scormAPI.LMSInitialize("");
+                if (initResult === "true") {
+                    scormActive = true;
+                    scormLog("init", "LMS SCORM 1.2 Dikesan & Diaktifkan", "");
+                    
+                    var lmsName = scormAPI.LMSGetValue("cmi.core.student_name");
+                    if (lmsName && lmsName.trim() !== "") {
+                        name = formatStudentName(lmsName);
+                        document.getElementById('userNameLabel').innerText = name;
+                    }
+                    
+                    var status = scormAPI.LMSGetValue("cmi.core.lesson_status");
+                    if (status === "not attempted" || status === "unknown" || status === "") {
+                        scormAPI.LMSSetValue("cmi.core.lesson_status", "incomplete");
+                        scormAPI.LMSCommit("");
+                    }
+                    
+                    restoreScormState();
+                } else {
+                    scormLog("error", "Gagal LMSInitialize()", "");
+                    setupLocalMock();
+                }
+            } else {
+                setupLocalMock();
+            }
+        }
+
+        function setupLocalMock() {
+            scormAPI = mockAPI;
+            scormActive = false;
+            scormLog("init", "Mod Simulasi Diaktifkan (Tiada LMS dikesan)", "Konsol Log SCORM diaktifkan di bahagian bawah");
+            
+            drawSimulatorConsole();
+            document.getElementById('userNameLabel').innerText = name;
+            
+            try {
+                var localSave = localStorage.getItem('mock_scorm_data');
+                if (localSave) {
+                    localScormData = JSON.parse(localSave);
+                    scormLog("init", "Memulihkan data simulasi dari Penyimpanan Tempatan (localStorage)", "");
+                    restoreScormState();
+                }
+            } catch (e) {
+                console.error("Local storage error:", e);
+            }
+        }
+
+        function drawSimulatorConsole() {
+            const consoleDiv = document.createElement('div');
+            consoleDiv.id = "scormSimulatorOverlay";
+            consoleDiv.className = "fixed bottom-4 right-4 z-[9999] w-80 bg-slate-900/95 border border-slate-700/50 rounded-2xl shadow-2xl text-slate-100 flex flex-col overflow-hidden transition-all duration-300 font-sans backdrop-blur-md";
+            consoleDiv.style.maxHeight = "380px";
+            
+            consoleDiv.innerHTML = `
+                <div class="bg-slate-800/80 border-b border-slate-700/50 px-4 py-2.5 flex items-center justify-between cursor-pointer select-none" onclick="toggleConsoleMin()">
+                    <div class="flex items-center space-x-2">
+                        <span class="w-2.5 h-2.5 rounded-full bg-teal-500 animate-pulse"></span>
+                        <span class="text-xs font-bold uppercase tracking-wider text-teal-400">SCORM 1.2 Console</span>
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        <button class="text-slate-400 hover:text-white text-xs focus:outline-none" title="Ulang set data simulasi" onclick="resetLocalSCORM(event)">
+                            <i class="fa-solid fa-arrows-rotate"></i>
+                        </button>
+                        <i id="consoleMinIcon" class="fa-solid fa-chevron-down text-slate-400 hover:text-white text-xs"></i>
+                    </div>
+                </div>
+                
+                <div id="consoleBody" class="flex flex-col flex-1 p-3 space-y-3 overflow-hidden">
+                    <div class="bg-slate-950/60 p-2.5 rounded-xl border border-slate-800 grid grid-cols-2 gap-2 text-[10px] font-medium text-slate-400">
+                        <div>
+                            <span class="block text-slate-500 text-[8px] uppercase">Pelajar:</span>
+                            <span id="scormValName" class="text-slate-300 font-bold truncate block"></span>
+                        </div>
+                        <div>
+                            <span class="block text-slate-500 text-[8px] uppercase">Halaman semasa:</span>
+                            <span id="scormValLoc" class="text-slate-300 font-bold font-mono"></span>
+                        </div>
+                        <div>
+                            <span class="block text-slate-500 text-[8px] uppercase">Status lesson_status:</span>
+                            <span id="scormValStatus" class="text-teal-400 font-bold"></span>
+                        </div>
+                        <div>
+                            <span class="block text-slate-500 text-[8px] uppercase">Markah raw:</span>
+                            <span id="scormValScore" class="text-amber-400 font-bold font-mono"></span>
+                        </div>
+                    </div>
+                    
+                    <div class="flex justify-between items-center text-[9px] uppercase font-bold text-slate-500 px-1">
+                        <span>Panggilan API Terkini</span>
+                        <button onclick="clearConsoleLogs()" class="hover:text-white">Padam</button>
+                    </div>
+
+                    <div id="scormLogContainer" class="flex-1 overflow-y-auto bg-slate-950/30 border border-slate-800/50 p-2 rounded-xl min-h-[120px] max-h-[140px] space-y-1.5 scrollbar-thin">
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(consoleDiv);
+            
+            scormLogs.forEach(log => {
+                const logContainer = document.getElementById('scormLogContainer');
+                if (logContainer) {
+                    const logItem = document.createElement('div');
+                    logItem.className = "text-[11px] font-mono py-1 border-b border-slate-800 flex flex-col";
+                    let badgeColor = "text-blue-400";
+                    if (log.type === "init" || log.type === "finish") badgeColor = "text-purple-400";
+                    else if (log.type === "set") badgeColor = "text-amber-400";
+                    else if (log.type === "get") badgeColor = "text-teal-400";
+                    else if (log.type === "commit") badgeColor = "text-emerald-400";
+                    else if (log.type === "error") badgeColor = "text-red-400";
+
+                    logItem.innerHTML = `
+                        <div class="flex items-center justify-between">
+                            <span class="text-slate-500">${log.time}</span>
+                            <span class="font-bold uppercase ${badgeColor}">${log.type}</span>
+                        </div>
+                        <span class="text-slate-200 mt-0.5">${log.message}</span>
+                        ${log.details ? `<span class="text-slate-400 text-[10px] break-all bg-slate-950/50 p-1 rounded mt-0.5">${log.details}</span>` : ""}
+                    `;
+                    logContainer.appendChild(logItem);
+                }
+            });
+            updateScormVarDisplay();
+        }
+
+        var isConsoleMinimized = false;
+        function toggleConsoleMin() {
+            const body = document.getElementById('consoleBody');
+            const icon = document.getElementById('consoleMinIcon');
+            const container = document.getElementById('scormSimulatorOverlay');
+            if (isConsoleMinimized) {
+                body.classList.remove('hidden');
+                container.style.maxHeight = "380px";
+                icon.className = "fa-solid fa-chevron-down text-slate-400 hover:text-white text-xs";
+            } else {
+                body.classList.add('hidden');
+                container.style.maxHeight = "38px";
+                icon.className = "fa-solid fa-chevron-up text-slate-400 hover:text-white text-xs";
+            }
+            isConsoleMinimized = !isConsoleMinimized;
+        }
+
+        function clearConsoleLogs() {
+            const container = document.getElementById('scormLogContainer');
+            if (container) container.innerHTML = '';
+        }
+
+        function resetLocalSCORM(e) {
+            if (e) e.stopPropagation();
+            if (confirm("Adakah anda ingin mereset semula semua data simulasi SCORM? Halaman anda akan dimuatkan semula.")) {
+                localStorage.removeItem('mock_scorm_data');
+                window.location.reload();
+            }
+        }
+
+        window.onunload = window.onbeforeunload = function() {
+            if (scormActive && scormAPI) {
+                var sessionTime = Date.now() - startTime;
+                scormAPI.LMSSetValue("cmi.core.session_time", formatCMITime(sessionTime));
+                scormAPI.LMSCommit("");
+                scormAPI.LMSFinish("");
+            }
+        };
+
         window.onload = function () {
-            renderSidebar();
-            updateGlobalNavigationUI();
+            initSCORM();
+            
+            if (currentScreenIdx === 0) {
+                renderSidebar();
+                updateGlobalNavigationUI();
+            }
+            
             renderQuizQuestion();
             renderMatchGame();
         };
